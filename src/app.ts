@@ -16,6 +16,7 @@ app.use(express.json());
 app.use(express.urlencoded());
 app.use(cors());
 app.use(cookieParser());
+app.disable("etag");
 
 const connect = async () => {
   try {

@@ -2,7 +2,9 @@ import { Request, Response } from "express";
 import { AuthUser, Table, User } from "../models";
 import { DB } from "../app";
 import { jwtDecode } from "jwt-decode";
+import { ObjectId } from "mongodb";
 
+// CREATE TABLE
 export const createTableController = async (req: Request, res: Response) => {
   const { tableName, visibility, tableColumns } = req.body;
 
@@ -57,6 +59,34 @@ export const createTableController = async (req: Request, res: Response) => {
   }
 };
 
+// EDIT TABLE
+export const editTableController = async (req: Request, res: Response) => {
+  const { tableId } = req.params;
+  const { tableName, visibility, tableColumns } = req.body;
+
+  try {
+    const table = await Table.findByIdAndUpdate(
+      tableId,
+      {
+        tableName,
+        visibility,
+        tableColumns,
+      },
+      {
+        new: true,
+      }
+    );
+
+    res.status(200).json(table);
+  } catch (error: any) {
+    res.status(400).json({
+      name: "Bad Request",
+      message: "Unable to update table",
+      error: error.message,
+    });
+  }
+};
+
 export const getTablesController = async (req: Request, res: Response) => {
   try {
     const tables = await Table.find({ visibility: "PUBLIC" });
@@ -87,7 +117,7 @@ export const getTableDetailsController = async (
     if (table?.visibility === "PRIVATE" && table.userId !== userId) {
       return res.status(400).json({
         name: "Bad Request",
-        message: `Failed to get table with this id ${tableId}`,
+        message: `You don't have access to this table: ${tableId}`,
       });
     }
 
@@ -96,6 +126,7 @@ export const getTableDetailsController = async (
     res.status(400).json({
       name: "Bad Request",
       message: `Failed to get table with this id ${tableId}`,
+      error: error.message,
     });
   }
 };
@@ -151,7 +182,7 @@ export const deleteTableController = async (req: Request, res: Response) => {
 
 export const getTableDataController = async (req: Request, res: Response) => {
   const { tableId } = req.params;
-  const { tableName } = req.body;
+  const { page = 1, limit = 10, sortColumn, sortDir, search } = req.query;
 
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.split(" ")[1];
@@ -163,11 +194,43 @@ export const getTableDataController = async (req: Request, res: Response) => {
 
     if (table?.visibility === "PUBLIC" || table?.userId === userId) {
       const database = await DB;
-      const DataCollection = await database?.collection(tableName);
+      const DataCollection = await database?.collection(table.tableName);
 
-      const data = await DataCollection?.find({}).toArray();
+      if (DataCollection) {
+        const searchOption = table.tableColumns.map((col) => ({
+          [col.name]: new RegExp(search as string, "i"),
+        }));
 
-      return res.status(200).json(data);
+        // PAGINATION
+
+        // Convert page and limit to integers
+        const pageNum = parseInt(page as string);
+        const limitNum = parseInt(limit as string);
+
+        // Calculate the starting index of the products
+        const startIndex = (pageNum - 1) * limitNum;
+
+        // Get the total number of products
+        const totalProducts = await DataCollection.countDocuments();
+
+        const data = await DataCollection.find({ $or: searchOption })
+          .sort({ [sortColumn as string]: sortDir === "asc" ? -1 : 1 })
+          .skip(startIndex)
+          .limit(limitNum)
+          .toArray();
+
+        return res.status(200).json({
+          total: totalProducts,
+          totalPages: Math.ceil(totalProducts / limitNum),
+          currentPage: pageNum,
+          data,
+        });
+      }
+
+      return res.status(400).json({
+        name: "Bad Request",
+        message: `Collection with name: ${table.tableName} not found`,
+      });
     }
 
     res.status(403).json({
@@ -178,25 +241,152 @@ export const getTableDataController = async (req: Request, res: Response) => {
     res.status(400).json({
       name: "Bad Request",
       message: "Failed to get table data",
+      error: error.message,
     });
   }
 };
 
 export const addTableDataController = async (req: Request, res: Response) => {
   const { tableId } = req.params;
-  const { tableName } = req.body;
+  const { data } = req.body;
 
   try {
-    const database = await DB;
-    const DataCollection = await database?.collection(tableName);
+    const table = await Table.findById(tableId);
 
-    const data = await DataCollection?.find({}).toArray();
+    if (table) {
+      const database = await DB;
+      const DataCollection = await database?.collection(table.tableName);
 
-    res.status(200).json(data);
+      const collectionData = await DataCollection?.insertMany(data);
+
+      return res.status(200).json(collectionData);
+    }
+
+    return res.status(400).json({
+      name: "Bad Request",
+      message: `Failed to get table with this id ${tableId}`,
+    });
+  } catch (error: any) {
+    console.log({ error });
+    res.status(400).json({
+      name: "Bad Request",
+      message: "Failed to add data to table",
+    });
+  }
+};
+
+// DELETE COLLECTION DOCUMENT
+export const deleteCollectionDocController = async (
+  req: Request,
+  res: Response
+) => {
+  const { tableId, documentId } = req.params;
+
+  try {
+    const table = await Table.findById(tableId);
+
+    if (table) {
+      const database = await DB;
+      const DataCollection = await database?.collection(table.tableName);
+
+      const doc = await DataCollection?.findOne({
+        _id: new ObjectId(documentId),
+      });
+
+      console.log({ doc });
+
+      await DataCollection?.findOneAndDelete({ _id: new ObjectId(documentId) });
+
+      res.status(200).json({
+        message: "Document deleted successfully",
+      });
+    }
   } catch (error: any) {
     res.status(400).json({
       name: "Bad Request",
-      message: "Failed to get table data",
+      message: "Failed to delete document, please try again",
+      error: error.message,
+    });
+  }
+};
+
+// EDIT COLLECTION DOCUMENT
+export const editCollectionDocController = async (
+  req: Request,
+  res: Response
+) => {
+  const { tableId, documentId } = req.params;
+  const newValues = req.body;
+
+  try {
+    const table = await Table.findById(tableId);
+
+    if (table) {
+      const database = await DB;
+      const DataCollection = await database?.collection(table.tableName);
+
+      const doc = await DataCollection?.findOneAndUpdate(
+        {
+          _id: new ObjectId(documentId),
+        },
+        {
+          $set: newValues,
+        }
+      );
+
+      res.status(200).json({
+        message: "Document updated successfully",
+        doc,
+      });
+    }
+  } catch (error: any) {
+    res.status(400).json({
+      name: "Bad Request",
+      message: "Failed to update document, please try again",
+      error: error.message,
+    });
+  }
+};
+
+// TABLES STATISTICS
+export const tablesStatisticsController = async (
+  req: Request,
+  res: Response
+) => {
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+
+  const { userId } = jwtDecode<AuthUser>(token ?? "");
+
+  try {
+    const myTables = await Table.find({ userId });
+    const database = await DB;
+
+    const documentsCount: Record<string, number> = {};
+
+    for (const table of myTables) {
+      const collectionName = table.tableName;
+
+      const count = await database?.collection(collectionName).countDocuments();
+
+      documentsCount[collectionName] = count ?? 0;
+    }
+
+    const myDocumentsCount = Object.values(documentsCount).reduce(
+      (acc, current) => acc + current,
+      0
+    );
+
+    res.status(200).json({
+      myDocumentsCount,
+      tablesCount: myTables.length,
+      documentsCount,
+    });
+  } catch (error: any) {
+    res.status(400).json({
+      name: "Bad Request",
+      message: "Failed to get tables statistics, please try again",
+      error: error.message,
     });
   }
 };
